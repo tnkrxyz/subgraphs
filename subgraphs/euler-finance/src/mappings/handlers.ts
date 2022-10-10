@@ -1,4 +1,4 @@
-import { Address, ethereum, BigInt } from "@graphprotocol/graph-ts";
+import { Address, ethereum, BigInt, BigDecimal } from "@graphprotocol/graph-ts";
 import {
   AssetStatus,
   Borrow,
@@ -14,7 +14,12 @@ import {
   EulerGeneralView__doQueryInputQStruct,
   EulerGeneralView__doQueryResultRStruct,
 } from "../../generated/euler/EulerGeneralView";
-import { getOrCreateProtocolUtility } from "../common/getters";
+import {
+  getOrCreateLendingProtocol,
+  getOrCreateMarket,
+  getOrCreateProtocolUtility,
+  getOrCreateToken,
+} from "../common/getters";
 import {
   EULER_ADDRESS,
   EULER_GENERAL_VIEW_ADDRESS,
@@ -39,10 +44,63 @@ import {
   syncWithEulerGeneralView,
   updateAsset,
   updateLendingFactors,
+  updateSnapshotRevenues,
 } from "./helpers";
+import { _AssetStatus } from "../../generated/schema";
 
 export function handleAssetStatus(event: AssetStatus): void {
   updateAsset(event);
+
+  const marketId = event.params.underlying.toHexString();
+  const block = event.block;
+  const totalBorrows = event.params.totalBorrows;
+  const reserveBalance = event.params.reserveBalance;
+  const timestamp = event.params.timestamp;
+
+  let assetStatus = _AssetStatus.load(marketId);
+  if (!assetStatus) {
+    // should only happen when market first initiated
+    assetStatus = new _AssetStatus(marketId);
+    assetStatus.totalBorrows = totalBorrows;
+    assetStatus.reserveBalance = reserveBalance;
+    assetStatus.timestamp = timestamp;
+    assetStatus.save();
+    return;
+  }
+
+  assert(
+    timestamp.gt(assetStatus.timestamp),
+    `event timestamp ${timestamp} <= assetStatus.timestamp ${assetStatus.timestamp}`,
+  );
+
+  const token = getOrCreateToken(Address.fromString(marketId));
+  const tokenPrecision = new BigDecimal(BigInt.fromI32(10).pow(<u8>token.decimals));
+
+  const deltaTotalRevenue = totalBorrows
+    .minus(assetStatus.totalBorrows)
+    .divDecimal(tokenPrecision)
+    .times(token.lastPriceUSD!);
+  const deltaProtocolSideRevenue = reserveBalance
+    .minus(assetStatus.reserveBalance)
+    .divDecimal(tokenPrecision)
+    .times(token.lastPriceUSD!);
+  const deltaSupplySideRevenue = deltaTotalRevenue.minus(deltaProtocolSideRevenue);
+
+  const protocol = getOrCreateLendingProtocol();
+  // update protocol revenue
+  protocol.cumulativeSupplySideRevenueUSD = protocol.cumulativeSupplySideRevenueUSD.plus(deltaSupplySideRevenue);
+  protocol.cumulativeProtocolSideRevenueUSD = protocol.cumulativeProtocolSideRevenueUSD.plus(deltaProtocolSideRevenue);
+  protocol.cumulativeTotalRevenueUSD = protocol.cumulativeTotalRevenueUSD.plus(deltaTotalRevenue);
+  protocol.save();
+
+  const market = getOrCreateMarket(marketId);
+  // update market's revenue
+  market.cumulativeSupplySideRevenueUSD = market.cumulativeSupplySideRevenueUSD.plus(deltaSupplySideRevenue);
+  market.cumulativeProtocolSideRevenueUSD = market.cumulativeProtocolSideRevenueUSD.plus(deltaProtocolSideRevenue);
+  market.cumulativeTotalRevenueUSD = market.cumulativeTotalRevenueUSD.plus(deltaTotalRevenue);
+  market.save();
+
+  updateSnapshotRevenues(marketId, block, deltaSupplySideRevenue, deltaProtocolSideRevenue, deltaTotalRevenue);
 }
 
 export function handleBorrow(event: Borrow): void {
