@@ -1,4 +1,4 @@
-import { Address, BigDecimal, ethereum, BigInt } from "@graphprotocol/graph-ts";
+import { Address, BigDecimal, ethereum, BigInt, log } from "@graphprotocol/graph-ts";
 import {
   AssetStatus,
   Borrow,
@@ -43,7 +43,7 @@ import {
 } from "../common/constants";
 import { getEthPriceUsd, getUnderlyingPrice } from "../common/pricing";
 import { amountToUsd } from "../common/conversions";
-import { updateMarketDailyMetrics, updateMarketHourlyMetrics } from "../common/metrics";
+import { updateFinancials, updateMarketDailyMetrics, updateMarketHourlyMetrics } from "../common/metrics";
 import { getAssetTotalSupply } from "../common/tokens";
 
 export function updateAsset(event: AssetStatus): void {
@@ -60,8 +60,8 @@ export function updateAsset(event: AssetStatus): void {
   const twapPrice = twapPriceWETH.toBigDecimal().times(ethPriceUsd);
   const market = getOrCreateMarket(tokenAddress);
 
-  token.lastPriceUSD = twapPrice;
-  token.lastPriceBlockNumber = event.block.number;
+  //token.lastPriceUSD = twapPrice;
+  //token.lastPriceBlockNumber = event.block.number;
   marketUtility.twapPrice = twapPrice;
 
   market.totalDepositBalanceUSD = amountToUsd(event.params.totalBalances, marketUtility.twap, marketUtility.twapPrice);
@@ -287,8 +287,9 @@ export function createMarket(event: MarketActivated): void {
 //    revenues
 export function syncWithEulerGeneralView(
   eulerViewQueryResponse: EulerGeneralView__doQueryResultRStruct,
-  block: ethereum.Block,
+  event: ethereum.Event,
 ): void {
+  const block = event.block;
   let ethUsdcExchangeRate = BIGDECIMAL_ONE;
   const eulerViewMarkets = eulerViewQueryResponse.markets;
 
@@ -328,6 +329,18 @@ export function syncWithEulerGeneralView(
     token.lastPriceUSD = currPriceUsd;
     token.lastPriceBlockNumber = block.number;
     token.save();
+
+    log.info(
+      "[syncWithEulerGeneralView]blk={},market={},token.id={},currPrice={},currPriceUsd={},token.lastPriceUSD={}",
+      [
+        event.transaction.hash.toHexString(),
+        market.id,
+        token.id,
+        currPrice.toString(),
+        currPriceUsd.toString(),
+        token.lastPriceUSD!.toString(),
+      ],
+    );
 
     // needed to update the protocol level quantities
     const prevMarketTotalValueLockedUSD = market.totalValueLockedUSD;
@@ -431,7 +444,24 @@ export function syncWithEulerGeneralView(
     */
 
     market.save();
+    log.info(
+      "[syncWithEulerGeneralView]blk={},market={},prev tvl={},tvl={},protocl tvl={},prev borrowBal={},borrowBal={},protocol borrowBal={},prev DepositBal={},DepositBal={},protocol DepositBal={}",
+      [
+        event.transaction.hash.toHexString(),
+        market.id,
+        prevMarketTotalValueLockedUSD.toString(),
+        market.totalValueLockedUSD.toString(),
+        protocol.totalValueLockedUSD.toString(),
+        prevMarketTotalBorrowBalanceUSD.toString(),
+        market.totalBorrowBalanceUSD.toString(),
+        protocol.totalBorrowBalanceUSD.toString(),
+        prevMarketTotalDepositBalanceUSD.toString(),
+        market.totalDepositBalanceUSD.toString(),
+        protocol.totalDepositBalanceUSD.toString(),
+      ],
+    );
 
+    //update TVL, borrow balance, and deposit balance
     protocol.totalValueLockedUSD = protocol.totalValueLockedUSD
       .minus(prevMarketTotalValueLockedUSD)
       .plus(market.totalValueLockedUSD);
@@ -441,6 +471,17 @@ export function syncWithEulerGeneralView(
     protocol.totalDepositBalanceUSD = protocol.totalDepositBalanceUSD
       .minus(prevMarketTotalDepositBalanceUSD)
       .plus(market.totalDepositBalanceUSD);
+
+    log.info(
+      "[syncWithEulerGeneralView]blk={},market={},protocl tvl={},protocol borrowBal={}, protocol DepositBal={}",
+      [
+        event.transaction.hash.toHexString(),
+        market.id,
+        protocol.totalValueLockedUSD.toString(),
+        protocol.totalBorrowBalanceUSD.toString(),
+        protocol.totalDepositBalanceUSD.toString(),
+      ],
+    );
 
     marketUtility.lastUpdateTimestamp = block.timestamp;
     marketUtility.market = market.id;
@@ -452,6 +493,7 @@ export function syncWithEulerGeneralView(
     updateMarketHourlyMetrics(block, market.id, BIGDECIMAL_ZERO);
   }
   protocol.save();
+  updateFinancials(event.block, BIGDECIMAL_ZERO, "NA");
 }
 
 export function updateSnapshotRevenues(

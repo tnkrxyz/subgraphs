@@ -1,8 +1,9 @@
-import { Address, ethereum, BigInt, BigDecimal } from "@graphprotocol/graph-ts";
+import { Address, ethereum, BigInt, BigDecimal, log } from "@graphprotocol/graph-ts";
 import {
   AssetStatus,
   Borrow,
   Deposit,
+  Euler,
   GovSetAssetConfig,
   Liquidation,
   MarketActivated,
@@ -14,6 +15,7 @@ import {
   EulerGeneralView__doQueryInputQStruct,
   EulerGeneralView__doQueryResultRStruct,
 } from "../../generated/euler/EulerGeneralView";
+import { RiskManager } from "../../generated/euler/RiskManager";
 import {
   getOrCreateLendingProtocol,
   getOrCreateMarket,
@@ -27,6 +29,14 @@ import {
   TransactionType,
   EULER_GENERAL_VIEW_V2_ADDRESS,
   VIEW_V2_START_BLOCK_NUMBER,
+  INTERNAL_DEBT_PRECISION,
+  MODULEID__EXEC,
+  MODULEID__RISK_MANAGER,
+  BIGINT_ZERO,
+  DECIMAL_PRECISION,
+  INITIAL_INTEREST_ACCUMULATOR,
+  BIGDECIMAL_ONE,
+  USDC_ERC20_ADDRESS,
 } from "../common/constants";
 import {
   updateFinancials,
@@ -47,6 +57,7 @@ import {
   updateSnapshotRevenues,
 } from "./helpers";
 import { _AssetStatus } from "../../generated/schema";
+import { Exec } from "../../generated/euler/Exec";
 
 export function handleAssetStatus(event: AssetStatus): void {
   updateAsset(event);
@@ -55,36 +66,71 @@ export function handleAssetStatus(event: AssetStatus): void {
   const block = event.block;
   const totalBorrows = event.params.totalBorrows;
   const reserveBalance = event.params.reserveBalance;
+  const interestAccumulator = event.params.interestAccumulator;
   const timestamp = event.params.timestamp;
 
-  let assetStatus = _AssetStatus.load(marketId);
-  if (!assetStatus) {
-    // should only happen when market first initiated
-    assetStatus = new _AssetStatus(marketId);
-    assetStatus.totalBorrows = totalBorrows;
-    assetStatus.reserveBalance = reserveBalance;
-    assetStatus.timestamp = timestamp;
-    assetStatus.save();
-    return;
-  }
+  /*  
+  const eulerContract = Euler.bind(Address.fromString(EULER_ADDRESS));
+  const execAddress = eulerContract.moduleIdToImplementation(MODULEID__EXEC);
+  const execContract = Exec.bind(execAddress);
+  const twapPrice = execContract.getPriceFull(event.params.underlying).getCurrPrice();
+
+  const RiskMgrAddress = eulerContract.moduleIdToImplementation(MODULEID__RISK_MANAGER);
+  log.info("[handleAssetStatus]riskMgrAddress={}", [RiskMgrAddress.toHexString()]);
+
+  const riskMgrContract = RiskManager.bind(RiskMgrAddress);
+  //const twapPrice = riskMgrContract.getPrice(event.params.underlying).getTwap();
+  const twapPrice = riskMgrContract.getPriceFull(event.params.underlying).getCurrPrice();
+  */
+
+  const assetStatus = getOrCreateAssetStatus(marketId);
 
   assert(
-    timestamp.gt(assetStatus.timestamp),
-    `event timestamp ${timestamp} <= assetStatus.timestamp ${assetStatus.timestamp}`,
+    !assetStatus.timestamp || timestamp.ge(assetStatus.timestamp!),
+    `event timestamp ${timestamp} < assetStatus.timestamp`,
+  );
+
+  assert(
+    interestAccumulator.ge(assetStatus.interestAccumulator!),
+    `event interestAccumulator(${interestAccumulator}) < assetStatus.interestAccumulator(${assetStatus.interestAccumulator!})`,
   );
 
   const token = getOrCreateToken(Address.fromString(marketId));
   const tokenPrecision = new BigDecimal(BigInt.fromI32(10).pow(<u8>token.decimals));
+  log.info("[handleAssetStatus]underlying={},blk={},tx={},token.id={},token.lastPriceUSD={}", [
+    marketId,
+    block.number.toString(),
+    event.transaction.hash.toHexString(),
+    token.id,
+    token.lastPriceUSD!.toString(),
+  ]);
 
   const deltaTotalRevenue = totalBorrows
-    .minus(assetStatus.totalBorrows)
-    .divDecimal(tokenPrecision)
+    .toBigDecimal()
+    .times(BIGDECIMAL_ONE.minus(assetStatus.interestAccumulator!.divDecimal(interestAccumulator.toBigDecimal())))
+    .div(DECIMAL_PRECISION)
     .times(token.lastPriceUSD!);
   const deltaProtocolSideRevenue = reserveBalance
     .minus(assetStatus.reserveBalance)
-    .divDecimal(tokenPrecision)
+    .divDecimal(DECIMAL_PRECISION)
     .times(token.lastPriceUSD!);
   const deltaSupplySideRevenue = deltaTotalRevenue.minus(deltaProtocolSideRevenue);
+
+  log.info(
+    "[handleAssetStatus]totalBorrows={},prev totalBorrows={},totalRev={},reserveBalance={},prev reserveBal={},protocolSideRev={},price={},precision={}",
+    [
+      //block.number.toString(),
+      //event.transaction.hash.toHexString(),
+      totalBorrows.toString(),
+      assetStatus.totalBorrows.toString(),
+      deltaTotalRevenue.toString(),
+      reserveBalance.toString(),
+      assetStatus.reserveBalance.toString(),
+      deltaProtocolSideRevenue.toString(),
+      token.lastPriceUSD!.toString(),
+      tokenPrecision.toString(),
+    ],
+  );
 
   const protocol = getOrCreateLendingProtocol();
   // update protocol revenue
@@ -101,6 +147,24 @@ export function handleAssetStatus(event: AssetStatus): void {
   market.save();
 
   updateSnapshotRevenues(marketId, block, deltaSupplySideRevenue, deltaProtocolSideRevenue, deltaTotalRevenue);
+
+  assetStatus.totalBorrows = totalBorrows;
+  assetStatus.reserveBalance = reserveBalance;
+  assetStatus.interestAccumulator = interestAccumulator;
+  assetStatus.timestamp = timestamp;
+  assetStatus.save();
+}
+
+function getOrCreateAssetStatus(id: string): _AssetStatus {
+  let assetStatus = _AssetStatus.load(id);
+  if (!assetStatus) {
+    assetStatus = new _AssetStatus(id);
+    assetStatus.totalBorrows = BIGINT_ZERO;
+    assetStatus.reserveBalance = BIGINT_ZERO;
+    assetStatus.interestAccumulator = INITIAL_INTEREST_ACCUMULATOR;
+    assetStatus.save();
+  }
+  return assetStatus;
 }
 
 export function handleBorrow(event: Borrow): void {
@@ -110,7 +174,7 @@ export function handleBorrow(event: Borrow): void {
   updateFinancials(event.block, borrowUSD, TransactionType.BORROW);
   updateMarketDailyMetrics(event.block, marketId, borrowUSD, TransactionType.BORROW);
   updateMarketHourlyMetrics(event.block, marketId, borrowUSD, TransactionType.BORROW);
-  updateProtocolAndMarkets(event.block, marketId);
+  updateProtocolAndMarkets(event, marketId);
 }
 
 export function handleDeposit(event: Deposit): void {
@@ -120,7 +184,7 @@ export function handleDeposit(event: Deposit): void {
   updateFinancials(event.block, depositUSD, TransactionType.DEPOSIT);
   updateMarketDailyMetrics(event.block, marketId, depositUSD, TransactionType.DEPOSIT);
   updateMarketHourlyMetrics(event.block, marketId, depositUSD, TransactionType.DEPOSIT);
-  updateProtocolAndMarkets(event.block, marketId);
+  updateProtocolAndMarkets(event, marketId);
 }
 
 export function handleRepay(event: Repay): void {
@@ -130,7 +194,7 @@ export function handleRepay(event: Repay): void {
   updateFinancials(event.block, repayUSD, TransactionType.REPAY);
   updateMarketDailyMetrics(event.block, marketId, repayUSD, TransactionType.REPAY);
   updateMarketHourlyMetrics(event.block, marketId, repayUSD, TransactionType.REPAY);
-  updateProtocolAndMarkets(event.block, marketId);
+  updateProtocolAndMarkets(event, marketId);
 }
 
 export function handleWithdraw(event: Withdraw): void {
@@ -140,7 +204,7 @@ export function handleWithdraw(event: Withdraw): void {
   updateFinancials(event.block, withdrawUSD, TransactionType.WITHDRAW);
   updateMarketDailyMetrics(event.block, marketId, withdrawUSD, TransactionType.WITHDRAW);
   updateMarketHourlyMetrics(event.block, marketId, withdrawUSD, TransactionType.WITHDRAW);
-  updateProtocolAndMarkets(event.block, marketId);
+  updateProtocolAndMarkets(event, marketId);
 }
 
 export function handleLiquidation(event: Liquidation): void {
@@ -150,7 +214,7 @@ export function handleLiquidation(event: Liquidation): void {
   updateFinancials(event.block, liquidateUSD, TransactionType.LIQUIDATE);
   updateMarketDailyMetrics(event.block, marketId, liquidateUSD, TransactionType.LIQUIDATE);
   updateMarketHourlyMetrics(event.block, marketId, liquidateUSD, TransactionType.LIQUIDATE);
-  updateProtocolAndMarkets(event.block, marketId);
+  updateProtocolAndMarkets(event, marketId);
 }
 
 export function handleGovSetAssetConfig(event: GovSetAssetConfig): void {
@@ -203,13 +267,13 @@ function queryEulerGeneralView(
 }
 
 // initiates market / protocol updates in syncWithEulerGeneralView()
-function updateProtocolAndMarkets(block: ethereum.Block, marketId: string): void {
-  let blockNumber = block.number.toI32();
+function updateProtocolAndMarkets(event: ethereum.Event, marketId: string): void {
+  let blockNumber = event.block.number.toI32();
   let protocolUtility = getOrCreateProtocolUtility(blockNumber);
   let markets = protocolUtility.markets;
   const marketIndex = markets.indexOf(marketId);
   assert(marketIndex >= 0, `[updateProtocolAndMarkets]marketId=${marketId} not in protocolUtility.markets`);
-  markets = [marketId];
+  markets = [marketId, USDC_ERC20_ADDRESS];
 
   /* 
   if (protocolUtility.lastBlockNumber >= blockNumber - 120) {
@@ -220,7 +284,7 @@ function updateProtocolAndMarkets(block: ethereum.Block, marketId: string): void
   }
   */
 
-  let eulerViewQueryResult = queryEulerGeneralView(markets, block);
+  let eulerViewQueryResult = queryEulerGeneralView(markets, event.block);
   if (!eulerViewQueryResult) {
     return;
   }
@@ -229,5 +293,5 @@ function updateProtocolAndMarkets(block: ethereum.Block, marketId: string): void
   protocolUtility.lastBlockNumber = blockNumber;
   protocolUtility.save();
 
-  syncWithEulerGeneralView(eulerViewQueryResult, block);
+  syncWithEulerGeneralView(eulerViewQueryResult, event);
 }

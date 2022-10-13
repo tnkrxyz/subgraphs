@@ -1090,6 +1090,8 @@ type _AssetStatus @entity {
   totalBorrows: BigInt!
   "last reserveBalance"
   reserveBalance: BigInt!
+  "interestAccumulator"
+  interestAccumulator: BigInt
   "last timestamp"
-  timestamp: BigInt!
+  timestamp: BigInt
 }
