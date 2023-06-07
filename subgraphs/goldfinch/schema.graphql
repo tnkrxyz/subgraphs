@@ -1322,9 +1322,21 @@ Notes
   https://thegraph.com/docs/developer/create-subgraph-hosted#reverse-lookups
 """
 type SeniorPool @entity {
-  id: ID!
-  latestPoolStatus: SeniorPoolStatus!
-  investmentsMade: [TranchedPool!]!
+  id: ID! # Hardcoded to "1", the Senior Pool is a singleton
+  address: Bytes!
+  sharePrice: BigInt!
+  totalShares: BigInt!
+  assets: BigInt!
+  totalLoansOutstanding: BigInt!
+  tranchedPools: [TranchedPool!]!
+  withdrawalCancellationFee: BigDecimal!
+  estimatedTotalInterest: BigDecimal!
+  estimatedApy: BigDecimal!
+  estimatedApyFromGfiRaw: BigDecimal!
+
+  totalInvested: BigInt!
+  totalWrittenDown: BigInt!
+  defaultRate: BigDecimal!
 }
 
 enum StakedPositionType {
@@ -1343,32 +1355,14 @@ type SeniorPoolStakedPosition @entity {
   """
   startTime: BigInt!
   totalRewardsClaimed: BigInt!
+
+  vaultedAsset: VaultedStakedPosition
 }
 
-type SeniorPoolStatus @entity {
-  """
-  This entity is a singleton, so the id is always "1"
-  """
+type BorrowerContract @entity {
   id: ID!
-  rawBalance: BigInt!
-  balance: BigInt!
-  """
-  The actual amount of USDC associated with the Senior Pool contract, can also be thought of as the Senior Pool's liquidity in USDC
-  """
-  usdcBalance: BigInt!
-  sharePrice: BigInt!
-  totalShares: BigInt!
-  totalPoolAssets: BigInt!
-  totalPoolAssetsUsdc: BigInt!
-  totalLoansOutstanding: BigInt!
-  cumulativeWritedowns: BigInt!
-  tranchedPools: [TranchedPool!]!
-  cumulativeDrawdowns: BigInt! # TODO requries tranched pool data
-  estimatedTotalInterest: BigDecimal!
-  estimatedApy: BigDecimal!
-  estimatedApyFromGfiRaw: BigDecimal!
-  defaultRate: BigInt! # TODO requires cumulativeDrawdowns
-  remainingCapacity: BigInt # TODO requires goldfinchConfig.totalFundsLimit
+  createdAt: BigInt!
+  user: User!
 }
 
 type User @entity {
@@ -1377,18 +1371,16 @@ type User @entity {
     @derivedFrom(field: "user")
   vaultedStakedPositions: [VaultedStakedPosition!]! @derivedFrom(field: "user")
 
-  tranchedPoolTokens: [TranchedPoolToken!]!
+  poolTokens: [PoolToken!]!
   vaultedPoolTokens: [VaultedPoolToken!]! @derivedFrom(field: "user")
   zaps: [Zap!]! @derivedFrom(field: "user")
 
-  isNonUsIndividual: Boolean!
-  isUsAccreditedIndividual: Boolean!
-  isUsNonAccreditedIndividual: Boolean!
-  isUsEntity: Boolean!
-  isNonUsEntity: Boolean!
+  uidType: UidType
   isGoListed: Boolean!
 
   transactions: [Transaction!]! @derivedFrom(field: "user")
+
+  borrowerContracts: [BorrowerContract!]! @derivedFrom(field: "user")
 
   communityRewardsTokens: [CommunityRewardsToken!]! @derivedFrom(field: "user")
 }
@@ -1448,7 +1440,56 @@ enum UidType {
   NON_US_ENTITY
 }
 
-type TranchedPool @entity {
+enum RepaymentFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  QUARTERLY
+  HALFLY
+  ANNUALLY
+}
+
+interface Loan {
+  id: ID!
+  address: Bytes!
+  fundingLimit: BigInt!
+  principalAmount: BigInt!
+  """
+  The amount of interest determined to be owed to this pool, calculated at the very beginning
+  """
+  initialInterestOwed: BigInt!
+  usdcApy: BigDecimal!
+  rawGfiApy: BigDecimal!
+  totalDeposited: BigInt!
+  remainingCapacity: BigInt!
+  fundableAt: Int!
+  createdAt: Int!
+  allowedUidTypes: [UidType!]!
+  backers: [User!]!
+  numBackers: Int!
+  isPaused: Boolean!
+  drawdownsPaused: Boolean!
+  tokens: [PoolToken!]!
+  repaymentSchedule: [ScheduledRepayment!]!
+  numRepayments: Int!
+  principalAmountRepaid: BigInt!
+  interestAmountRepaid: BigInt!
+
+  # "Credit line" fields
+  balance: BigInt!
+  termEndTime: BigInt!
+  termStartTime: BigInt!
+  termInSeconds: Int!
+  interestRate: BigDecimal!
+  interestRateBigInt: BigInt! # For use in calculations that have to be done with integers (to mimic on-chain math)
+  lateFeeRate: BigDecimal!
+  borrowerContract: BorrowerContract!
+  creditLineAddress: Bytes!
+  repaymentFrequency: RepaymentFrequency!
+}
+
+type TranchedPool implements Loan @entity {
   id: ID!
   estimatedJuniorApy: BigDecimal!
   estimatedJuniorApyFromGfiRaw: BigDecimal!
@@ -1474,7 +1515,7 @@ type TranchedPool @entity {
   estimatedSeniorPoolContribution: BigInt!
   backers: [User!]!
   numBackers: Int!
-  tokens: [TranchedPoolToken!]!
+  tokens: [PoolToken!]!
   seniorTranches: [SeniorTrancheInfo!]! @derivedFrom(field: "tranchedPool")
   juniorTranches: [JuniorTrancheInfo!]! @derivedFrom(field: "tranchedPool")
   version: TranchedPoolCreditLineVersion!
@@ -1491,7 +1532,22 @@ type TranchedPool @entity {
   initialInterestOwed: BigInt!
 }
 
-type TranchedPoolToken @entity {
+"""
+Captures protocol-wide data
+"""
+type _Protocol @entity {
+  id: ID! # Hardcoded to "1" because this is a singleton
+  totalWritedowns: BigInt!
+  totalDrawdowns: BigInt!
+  defaultRate: BigDecimal!
+  totalPrincipalCollected: BigInt!
+  totalInterestCollected: BigInt!
+  totalReserveCollected: BigInt!
+  loans: [Loan!]!
+  numLoans: Int!
+}
+
+type PoolToken @entity {
   id: ID! # Set to tokenId
   mintedAt: BigInt!
   user: User!
@@ -1623,7 +1679,7 @@ type Zap @entity {
   amount: BigInt!
   user: User!
   seniorPoolStakedPosition: SeniorPoolStakedPosition!
-  poolToken: TranchedPoolToken!
+  poolToken: PoolToken!
   tranchedPool: TranchedPool!
 }
 
@@ -1675,7 +1731,7 @@ type VaultedPoolToken @entity {
   user: User!
   usdcEquivalent: BigInt!
   vaultedAt: Int!
-  poolToken: TranchedPoolToken!
+  poolToken: PoolToken!
   tranchedPool: TranchedPool!
 }
 
@@ -1699,4 +1755,105 @@ type MembershipRewardDisbursement @entity(immutable: true) {
   epoch: BigInt! # The epoch number
   allocatedAt: Int!
   rewards: BigInt!
+}
+
+type SeniorPoolWithdrawalRequest @entity {
+  id: ID! # corresponds to the user address, since each user can only have one withdrawal request active at a time
+  tokenId: BigInt! # corresponds to the WithdrawalRequest token
+  user: User!
+  usdcWithdrawable: BigInt!
+  fiduRequested: BigInt!
+  requestedAt: Int!
+  increasedAt: Int
+  canceledAt: Int
+}
+
+type SeniorPoolWithdrawalEpoch @entity(immutable: true) {
+  id: ID!
+  epoch: BigInt! # the epoch number
+  endsAt: Int!
+  fiduRequested: BigInt!
+  fiduLiquidated: BigInt!
+  usdcAllocated: BigInt!
+}
+
+# Singleton that keeps track of all outstanding withdrawal requests
+type SeniorPoolWithdrawalRequestRoster @entity {
+  id: ID! # hard-coded to 1. This is a singleton.
+  requests: [SeniorPoolWithdrawalRequest!]!
+}
+
+type SeniorPoolWithdrawalDisbursement @entity(immutable: true) {
+  id: ID!
+  user: User!
+  """
+  If the user has had multiple withdrawal requests submitted and fulfilled over time, it might be useful to know what tokenId this distribution was associated with.
+  """
+  tokenId: BigInt!
+  epoch: BigInt! # The epoch number. Not a reference.
+  allocatedAt: Int!
+  usdcAllocated: BigInt!
+  fiduLiquidated: BigInt!
+}
+
+"""
+This entity is created when there is no money to allocate at the end of a withdrawal epoch
+"""
+type SeniorPoolWithdrawalDisbursementPostponement @entity(immutable: true) {
+  id: ID!
+  user: User!
+  tokenId: BigInt!
+  extendedEpoch: BigInt! # The epoch that was extended
+  oldEndsAt: Int!
+  newEndsAt: Int!
+}
+
+type CallableLoan implements Loan @entity {
+  id: ID!
+  address: Bytes!
+  fundingLimit: BigInt!
+  principalAmount: BigInt!
+  initialInterestOwed: BigInt!
+  usdcApy: BigDecimal!
+  rawGfiApy: BigDecimal!
+  totalDeposited: BigInt!
+  remainingCapacity: BigInt!
+  fundableAt: Int!
+  createdAt: Int!
+  allowedUidTypes: [UidType!]!
+  backers: [User!]!
+  numBackers: Int!
+  isPaused: Boolean!
+  drawdownsPaused: Boolean!
+  tokens: [PoolToken!]!
+
+  balance: BigInt!
+  termEndTime: BigInt!
+  termStartTime: BigInt!
+  termInSeconds: Int!
+  interestRate: BigDecimal!
+  interestRateBigInt: BigInt! # For use in calculations that have to be done with integers (to mimic on-chain math)
+  lateFeeRate: BigDecimal!
+  lastFullPaymentTime: Int!
+  availableForDrawdown: BigInt!
+  borrowerContract: BorrowerContract!
+  creditLineAddress: Bytes!
+  repaymentFrequency: RepaymentFrequency!
+
+  repaymentSchedule: [ScheduledRepayment!]!
+  """
+  Please note that numRepayments never updates, even if the underlying repaymentSchedule is changed. It always reflects the initial number of expected repayments.
+  """
+  numRepayments: Int!
+  principalAmountRepaid: BigInt!
+  interestAmountRepaid: BigInt!
+}
+
+type ScheduledRepayment @entity {
+  id: ID!
+  loan: Loan!
+  paymentPeriod: Int!
+  estimatedPaymentDate: Int!
+  principal: BigInt!
+  interest: BigInt!
 }

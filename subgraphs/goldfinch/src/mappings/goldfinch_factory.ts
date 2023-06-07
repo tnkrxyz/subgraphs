@@ -23,7 +23,7 @@ import {
   getOrCreateAccount,
   getOrCreateToken,
 } from "../common/getters";
-
+/*
 export function handleRoleGranted(event: RoleGranted): void {
   // Init GoldfinchConfig and SeniorPool template when GoldfinchFactory grants OWNER_ROLE (initialize())
   const contract = GoldfinchFactory.bind(event.address);
@@ -94,3 +94,15 @@ function isMigratedTranchedPool(event: PoolCreated): bool {
   }
   return false;
 }
+
+export function handleBorrowerCreated(event: BorrowerCreated): void {
+  getOrInitBorrower(event.params.borrower, event.params.owner, event.block.timestamp)
+}
+
+export function handleCallableLoanCreated(event: CallableLoanCreated): void {
+  CallableLoanTemplate.create(event.params.loan)
+  const callableLoan = initCallableLoan(event.params.loan, event.block)
+  callableLoan.save()
+  addToListOfAllLoans(event.params.loan)
+}
+*/

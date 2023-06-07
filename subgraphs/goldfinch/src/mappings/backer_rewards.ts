@@ -1,5 +1,5 @@
 import { BigInt } from "@graphprotocol/graph-ts";
-import { TranchedPoolToken } from "../../generated/schema";
+import { PoolToken } from "../../generated/schema";
 import {
   BackerRewardsSetTotalRewards,
   BackerRewardsSetMaxInterestDollarsEligible,
@@ -37,9 +37,7 @@ export function handleSetMaxInterestDollarsEligible(
 }
 
 export function handleBackerRewardsClaimed(event: BackerRewardsClaimed): void {
-  const poolToken = assert(
-    TranchedPoolToken.load(event.params.tokenId.toString())
-  );
+  const poolToken = assert(PoolToken.load(event.params.tokenId.toString()));
   poolToken.rewardsClaimed = event.params.amount;
   poolToken.rewardsClaimable = BigInt.zero();
   poolToken.save();
@@ -58,9 +56,7 @@ export function handleBackerRewardsClaimed(event: BackerRewardsClaimed): void {
 export function handleBackerRewardsClaimed1(
   event: BackerRewardsClaimed1
 ): void {
-  const poolToken = assert(
-    TranchedPoolToken.load(event.params.tokenId.toString())
-  );
+  const poolToken = assert(PoolToken.load(event.params.tokenId.toString()));
   poolToken.rewardsClaimed = event.params.amountOfTranchedPoolRewards;
   poolToken.stakingRewardsClaimed = event.params.amountOfSeniorPoolRewards;
   poolToken.rewardsClaimable = BigInt.zero();
